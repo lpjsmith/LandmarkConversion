@@ -3,6 +3,21 @@
 Convert 3D landmarks between formats, using the matching mesh when going between
 XYZ and barycentric (triangle-index + weights) representations.
 
+> **Which format should I use?**
+>
+> * **3D Slicer (`.mrk.json`) is the favoured format for viewing.** It opens directly in
+>   [3D Slicer](https://www.slicer.org/) with labelled, nicely rendered points on top of the mesh,
+>   so use it to look at, check and hand-edit landmarks.
+> * **Barycentric (Wrap 3D `[[tri,u,v], ...]`) is the format for correspondence.** It stores each
+>   landmark as *which triangle + where inside it* instead of a fixed position. Meshes that share
+>   the same topology (same vertex/face order, e.g. all registered/wrapped to one template) can
+>   therefore reuse one barycentric file: **landmark a single mesh, and every other mesh in the
+>   same correspondence gets the equivalent landmarks for free** – just convert the barycentric
+>   file against each mesh (`--to slicer_mrk_json --mesh other_case.obj`).
+>
+> This only works for meshes in correspondence; for an arbitrary scan with its own triangulation
+> the triangle indices mean nothing, so landmark it (or register it to the template) first.
+
 | Key (`--to`)      | Format                                   | Kind        |
 |-------------------|------------------------------------------|-------------|
 | `ljson`           | Menpo LJSON v2 (`.ljson`) – points + named groups + connectivity | XYZ |
