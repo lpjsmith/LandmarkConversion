@@ -9,4 +9,5 @@ pymeshlab==2022.2.post3
 pywin32-ctypes==0.2.3
 rtree==1.4.0
 scipy==1.15.3
+tkinterdnd2==0.7.0
 trimesh==4.11.2

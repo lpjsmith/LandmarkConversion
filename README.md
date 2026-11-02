@@ -49,15 +49,38 @@ drops a copy of `landmark_convert.py` there (`--no-provenance` to skip).
 
 ### Barycentric convention
 
-`point = u·A + v·B + (1−u−v)·C`, with `A, B, C` the triangle's vertices in file order and
-`tri` the 0-based face index. Meshes are loaded with `process=False` so face order matches
-the file exactly. Note `legacy/barycentric_to_3dslicer_markup.py` used a different
-convention (`(1−u−v)·A + u·B + v·C`).
+`[tri, u, v]` with `tri` the 0-based face index, `w = 1−u−v`, and `A, B, C` the triangle's
+vertices in file order. Two conventions are supported – pick with `--bary-convention`
+(or the radio buttons in the app):
 
-## Building the Windows .exe
+| `--bary-convention` | point                  | used by |
+|---------------------|------------------------|---------|
+| `standard` (default)| `u·A + v·B + w·C`      | `landmark_convert.py`, `legacy/lmk_converter_script.py` |
+| `legacy`            | `w·A + u·B + v·C`      | `legacy/barycentric_to_3dslicer_markup.py` |
+
+Use the same convention in both directions. If a bary file converts to points that sit on
+the mesh but in the wrong places, it was written with the other convention.
+Meshes are loaded with `process=False` so face order matches the file exactly.
+
+## Drag-and-drop app (Windows + Linux)
+
+`landmark_convert_gui.py` is a small window: drop landmark files or folders onto it (or onto
+the app icon), choose the target format, barycentric convention and optional mesh / LJSON
+template / output folder, then **Convert**. It runs the same code as the CLI and records the
+equivalent command in `run_command.txt`.
 
 ```bash
-pyinstaller landmark_convert.spec   # -> dist/landmark_convert.exe (drag landmark files onto it)
+python landmark_convert_gui.py            # run from source
+```
+
+Build standalone apps (PyInstaller can't cross-compile, so build each on its own OS):
+
+```bash
+# Linux  -> dist/linux/landmark-converter (GUI) + dist/linux/landmark-convert (CLI)
+bash build_linux.sh             # add --install to put it in ~/.local/bin + your app menu
+
+# Windows (cmd, in a Windows Python env) -> dist\windows\LandmarkConverter.exe + landmark_convert.exe
+build_windows.bat
 ```
 
 ## legacy/

@@ -295,11 +295,19 @@ def save_wrap3d_bary_txt(path: str, bary: List[Tuple[int, float, float]]) -> Non
 # ---------------------------
 # Barycentric math
 # ---------------------------
-# Convention used throughout: point = u*A + v*B + w*C, w = 1-u-v,
-# where A, B, C are the triangle's vertices in file order.
+# [tri, u, v] with w = 1-u-v; A, B, C are the triangle's vertices in file order.
+#   standard: point = u*A + v*B + w*C   (landmark_convert.py / lmk_converter_script.py)
+#   legacy:   point = w*A + u*B + v*C   (legacy/barycentric_to_3dslicer_markup.py)
 
-def xyz_to_bary(xyz: np.ndarray, mesh: trimesh.Trimesh,
-                warn_dist: Optional[float] = None) -> List[Tuple[int, float, float]]:
+BaryConvention = Literal["standard", "legacy"]
+BARY_CONVENTIONS = {
+    "standard": "standard — u·A + v·B + (1−u−v)·C",
+    "legacy": "legacy — (1−u−v)·A + u·B + v·C",
+}
+
+
+def xyz_to_bary(xyz: np.ndarray, mesh: trimesh.Trimesh, warn_dist: Optional[float] = None,
+                convention: BaryConvention = "standard") -> List[Tuple[int, float, float]]:
     """
     Project each point onto the closest mesh triangle and return (triangle_index, u, v).
     Points further than warn_dist from the surface are reported (they get snapped).
@@ -312,11 +320,13 @@ def xyz_to_bary(xyz: np.ndarray, mesh: trimesh.Trimesh,
             print(f"   ⚠️ Landmark {i+1} is {distance[i]:.4g} from the mesh surface (snapped onto it).")
 
     # Barycentrics of the projected point, so bary -> xyz reproduces it exactly
-    w = trimesh.triangles.points_to_barycentric(mesh.triangles[tri_ids], closest)
-    return [(int(t), float(a), float(b)) for t, (a, b, _) in zip(tri_ids, w)]
+    w = trimesh.triangles.points_to_barycentric(mesh.triangles[tri_ids], closest)  # weights on A, B, C
+    uv = w[:, :2] if convention == "standard" else w[:, 1:]
+    return [(int(t), float(u), float(v)) for t, (u, v) in zip(tri_ids, uv)]
 
 
-def bary_to_xyz(bary: List[Tuple[int, float, float]], mesh: trimesh.Trimesh) -> np.ndarray:
+def bary_to_xyz(bary: List[Tuple[int, float, float]], mesh: trimesh.Trimesh,
+                convention: BaryConvention = "standard") -> np.ndarray:
     tri_ids = np.array([int(t) for t, _, _ in bary])
     if len(tri_ids) and tri_ids.max() >= len(mesh.faces):
         raise ValueError(
@@ -324,7 +334,11 @@ def bary_to_xyz(bary: List[Tuple[int, float, float]], mesh: trimesh.Trimesh) -> 
             "Is this the right mesh?"
         )
     uv = np.array([(u, v) for _, u, v in bary], dtype=float).reshape(-1, 2)
-    weights = np.column_stack([uv, 1.0 - uv.sum(axis=1)])  # (N,3)
+    rest = 1.0 - uv.sum(axis=1)
+    if convention == "standard":
+        weights = np.column_stack([uv, rest])  # (N,3) weights on A, B, C
+    else:
+        weights = np.column_stack([rest, uv])
     return np.einsum("ij,ijk->ik", weights, mesh.triangles[tri_ids])
 
 
@@ -598,7 +612,7 @@ def require_mesh_if_needed(src: LandmarkSet, src_fmt: DetectedFormat, tgt: Targe
 
 
 def convert(landmarks: LandmarkSet, src_fmt: DetectedFormat, target: Target, mesh_path: Optional[str],
-            warn_dist: Optional[float] = None) -> LandmarkSet:
+            warn_dist: Optional[float] = None, convention: BaryConvention = "standard") -> LandmarkSet:
     out = LandmarkSet(
         labels=landmarks.labels[:] if landmarks.labels else None,
         ljson_groups=landmarks.ljson_groups,
@@ -614,7 +628,7 @@ def convert(landmarks: LandmarkSet, src_fmt: DetectedFormat, target: Target, mes
             if not mesh_path:
                 raise ValueError("Mesh required to convert barycentric -> xyz.")
             mesh = load_mesh(mesh_path)
-            out.xyz = bary_to_xyz(landmarks.bary, mesh)
+            out.xyz = bary_to_xyz(landmarks.bary, mesh, convention)
             return out
 
     # Wrap3D target needs bary
@@ -626,9 +640,9 @@ def convert(landmarks: LandmarkSet, src_fmt: DetectedFormat, target: Target, mes
             if not mesh_path:
                 raise ValueError("Mesh required to convert xyz -> barycentric.")
             mesh = load_mesh(mesh_path)
-            out.bary = xyz_to_bary(landmarks.xyz, mesh, warn_dist=warn_dist)
+            out.bary = xyz_to_bary(landmarks.xyz, mesh, warn_dist=warn_dist, convention=convention)
             # Round-trip check: how far the stored bary lands from the input point
-            err = np.linalg.norm(bary_to_xyz(out.bary, mesh) - landmarks.xyz, axis=1)
+            err = np.linalg.norm(bary_to_xyz(out.bary, mesh, convention) - landmarks.xyz, axis=1)
             print(f"   Round-trip xyz -> bary -> xyz error: max {err.max():.3g}, mean {err.mean():.3g}")
             return out
 
@@ -713,14 +727,19 @@ def save_output(path: str, converted: LandmarkSet, target: Target,
 # Provenance
 # ---------------------------
 
-def record_provenance(out_dirs: List[str]) -> None:
+def quote_arg(a: str) -> str:
+    return f'"{a}"' if any(ch in a for ch in " *?[") else a
+
+
+def record_provenance(out_dirs: List[str], cmd: Optional[str] = None) -> None:
     """Append date + exact command to run_command.txt and drop a copy of this script in each output folder."""
     stamp = datetime.datetime.now().isoformat(timespec="seconds")
     frozen = getattr(sys, "frozen", False)
-    cmd = " ".join(f'"{a}"' if any(ch in a for ch in " *?[") else a for a in sys.argv)
+    if cmd is None:
+        cmd = " ".join(quote_arg(a) for a in sys.argv)
     for d in sorted(set(out_dirs)):
         with open(os.path.join(d, "run_command.txt"), "a", encoding="utf-8") as f:
-            f.write(f"{stamp}  {'[exe] ' if frozen else ''}{cmd}\n")
+            f.write(f"{stamp}  {'[app] ' if frozen else ''}{cmd}\n")
         if not frozen:
             dst = os.path.join(d, os.path.basename(__file__))
             if os.path.abspath(dst) != os.path.abspath(__file__):
@@ -732,6 +751,7 @@ def record_provenance(out_dirs: List[str]) -> None:
 # ---------------------------
 
 LANDMARK_EXTS = (".mrk.json", ".ljson", ".xml", ".txt", ".csv")
+TARGETS = ["wrap3d_bary_txt", "slicer_mrk_json", "xyz_txt", "xml", "ljson"]
 
 
 def expand_inputs(inputs: List[str], pattern: str) -> List[str]:
@@ -744,14 +764,17 @@ def expand_inputs(inputs: List[str], pattern: str) -> List[str]:
             files.append(p)
         else:
             raise FileNotFoundError(p)
-    return [f for f in files if f.lower().endswith(LANDMARK_EXTS)]
+    return [f for f in files
+            if f.lower().endswith(LANDMARK_EXTS) and os.path.basename(f) != "run_command.txt"]
 
 
-def convert_one(in_path: str, target: Target, args, ljson_template: Optional[LandmarkSet]) -> str:
+def convert_one(in_path: str, target: Target, mesh: Optional[str] = None, out_dir: Optional[str] = None,
+                ljson_template: Optional[LandmarkSet] = None, warn_dist: Optional[float] = None,
+                convention: BaryConvention = "standard", force_mesh_obj: bool = False) -> str:
     landmarks, src_fmt = load_landmarks(in_path)
     print(f"Loaded: {os.path.basename(in_path)}  (detected: {DISPLAY_NAME.get(src_fmt, src_fmt)})")
 
-    mesh_path = args.mesh
+    mesh_path = mesh
     if mesh_path is None:
         mesh_path = find_mesh_for_landmarks(in_path)
 
@@ -762,19 +785,19 @@ def convert_one(in_path: str, target: Target, args, ljson_template: Optional[Lan
             raise FileNotFoundError(
                 "A mesh is required for this conversion, but none was found.\n"
                 "Put a mesh with the same basename in the same folder (e.g. case.obj / case.ply / case.stl),\n"
-                "or run with --mesh path/to/mesh."
+                "or pick one with --mesh path/to/mesh."
             )
         mesh_path = os.path.abspath(mesh_path)
-        print(f"Using mesh: {os.path.basename(mesh_path)}")
-        if args.force_mesh_obj:
+        print(f"Using mesh: {os.path.basename(mesh_path)}  (barycentric convention: {convention})")
+        if force_mesh_obj:
             obj_path = ensure_mesh_extension(mesh_path, ".obj")
             if obj_path != mesh_path:
                 print(f"Exported mesh copy as OBJ: {os.path.basename(obj_path)}")
             mesh_path = obj_path
 
-    converted = convert(landmarks, src_fmt, target, mesh_path, warn_dist=args.warn_dist)
+    converted = convert(landmarks, src_fmt, target, mesh_path, warn_dist=warn_dist, convention=convention)
 
-    out_path = default_output_path(in_path, target, args.out_dir)
+    out_path = default_output_path(in_path, target, out_dir)
     # avoid overwriting input when "convert to same format"
     if os.path.abspath(out_path) == os.path.abspath(in_path):
         root, ext = os.path.splitext(out_path)
@@ -787,19 +810,50 @@ def convert_one(in_path: str, target: Target, args, ljson_template: Optional[Lan
     return out_path
 
 
+def convert_many(files: List[str], target: Target, mesh: Optional[str] = None, out_dir: Optional[str] = None,
+                 template: Optional[str] = None, warn_dist: Optional[float] = None,
+                 convention: BaryConvention = "standard", force_mesh_obj: bool = False,
+                 provenance_cmd: Optional[str] = None, provenance: bool = True) -> Tuple[List[str], List[str]]:
+    """Convert every file; returns (outputs, failed inputs). Shared by the CLI and the GUI."""
+    if out_dir:
+        out_dir = os.path.abspath(out_dir)
+        os.makedirs(out_dir, exist_ok=True)
+    print(f"Target: {DISPLAY_NAME.get(target, target)} ({target})")
+    ljson_template = load_ljson(template) if template else None
+
+    out_paths, failed = [], []
+    for i, in_path in enumerate(files, start=1):
+        if len(files) > 1:
+            print(f"\n[{i}/{len(files)}]")
+        try:
+            out_paths.append(convert_one(in_path, target, mesh, out_dir, ljson_template,
+                                         warn_dist, convention, force_mesh_obj))
+        except Exception as e:
+            print(f"   ❌ {os.path.basename(in_path)}: {e}")
+            failed.append(in_path)
+
+    if out_paths and provenance:
+        record_provenance([os.path.dirname(p) for p in out_paths], provenance_cmd)
+
+    print(f"\nDone: {len(out_paths)} converted, {len(failed)} failed.")
+    return out_paths, failed
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Drag/drop landmark converter (Slicer / Wrap 3D bary / 3-matic XML / XYZ / Menpo LJSON).")
     parser.add_argument("inputs", nargs="+",
                         help="Landmark file(s) or folder(s) (drag/drop onto the .exe or run directly).")
-    parser.add_argument("--to", dest="to", default=None,
-                        choices=["wrap3d_bary_txt", "slicer_mrk_json", "xyz_txt", "xml", "ljson"],
+    parser.add_argument("--to", dest="to", default=None, choices=TARGETS,
                         help="Target format. If omitted, asks interactively.")
     parser.add_argument("--mesh", default=None,
                         help="Optional mesh path (otherwise auto-find by basename). Applies to every input.")
     parser.add_argument("--template", default=None,
                         help="LJSON whose groups/connectivity are copied when writing .ljson "
                              "(e.g. when converting Wrap 3D bary back to LJSON).")
+    parser.add_argument("--bary-convention", default="standard", choices=list(BARY_CONVENTIONS),
+                        help="How [tri,u,v] maps onto the triangle: "
+                             + "; ".join(BARY_CONVENTIONS.values()) + " (default: standard).")
     parser.add_argument("--pattern", default="*.ljson",
                         help="Glob used when an input is a folder (default: *.ljson).")
     parser.add_argument("--out-dir", default=None,
@@ -816,32 +870,12 @@ def main():
     if not files:
         raise FileNotFoundError("No landmark files found in the given inputs.")
 
-    if args.out_dir:
-        args.out_dir = os.path.abspath(args.out_dir)
-        os.makedirs(args.out_dir, exist_ok=True)
-
     target: Target = args.to if args.to else choose_target_interactive()  # type: ignore
-    print(f"Target: {DISPLAY_NAME.get(target, target)} ({target})")
 
-    ljson_template = load_ljson(args.template) if args.template else None
-
-    out_paths, failed = [], []
-    for i, in_path in enumerate(files, start=1):
-        if len(files) > 1:
-            print(f"\n[{i}/{len(files)}]")
-        try:
-            out_paths.append(convert_one(in_path, target, args, ljson_template))
-        except Exception as e:
-            if len(files) == 1:
-                raise
-            print(f"   ❌ {os.path.basename(in_path)}: {e}")
-            failed.append(in_path)
-
-    if out_paths and not args.no_provenance:
-        record_provenance([os.path.dirname(p) for p in out_paths])
-
-    if len(files) > 1:
-        print(f"\nDone: {len(out_paths)} converted, {len(failed)} failed.")
+    _, failed = convert_many(files, target, args.mesh, args.out_dir, args.template, args.warn_dist,
+                             args.bary_convention, args.force_mesh_obj, provenance=not args.no_provenance)
+    if failed:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

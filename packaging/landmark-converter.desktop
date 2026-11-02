@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Landmark Converter
+Comment=Convert 3D landmarks (LJSON / Slicer / Wrap 3D barycentric / 3-matic XML / XYZ)
+Exec=@BIN@ %F
+Icon=applications-science
+Terminal=false
+Categories=Science;Graphics;
