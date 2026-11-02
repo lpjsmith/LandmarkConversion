@@ -1,747 +1,13 @@
-# import os
-# import re
-# import json
-# import glob
-# import argparse
-# import xml.etree.ElementTree as ET
-# from dataclasses import dataclass
-# from typing import List, Optional, Tuple, Literal
-
-# import numpy as np
-# import trimesh
-
-
-# # ---------------------------
-# # Data model
-# # ---------------------------
-
-# @dataclass
-# class LandmarkSet:
-#     # If xyz is available: Nx3 float
-#     xyz: Optional[np.ndarray] = None
-
-#     # If barycentric is available: list of (tri_index, u, v) where w = 1-u-v
-#     bary: Optional[List[Tuple[int, float, float]]] = None
-
-#     # Optional labels (if found in XML, etc.)
-#     labels: Optional[List[str]] = None
-
-
-# # ---------------------------
-# # Utilities
-# # ---------------------------
-
-# def _strip_known_suffixes(filename: str) -> str:
-#     """
-#     For Slicer: 'case.mrk.json' -> 'case'
-#     For bary outputs like 'case_bary.json' you may want base 'case' still.
-#     """
-#     base = os.path.basename(filename)
-
-#     if base.lower().endswith(".mrk.json"):
-#         return base[:-len(".mrk.json")]
-#     for suf in ["_bary.json", "_bary.txt", ".json", ".txt", ".xml", ".csv"]:
-#         if base.lower().endswith(suf):
-#             return base[:-len(suf)]
-#     return os.path.splitext(base)[0]
-
-
-# def find_mesh_for_landmarks(landmark_path: str) -> Optional[str]:
-#     """
-#     Finds a mesh in the same folder with the same base name.
-#     Checks common mesh extensions.
-#     """
-#     folder = os.path.dirname(os.path.abspath(landmark_path))
-#     base = _strip_known_suffixes(landmark_path)
-
-#     exts = [".obj", ".ply", ".stl", ".off", ".glb", ".gltf"]
-#     candidates = []
-#     for ext in exts:
-#         p = os.path.join(folder, base + ext)
-#         if os.path.exists(p):
-#             candidates.append(p)
-
-#     # If not exact match, try glob for base.*
-#     if not candidates:
-#         for p in glob.glob(os.path.join(folder, base + ".*")):
-#             if os.path.splitext(p)[1].lower() in exts:
-#                 candidates.append(p)
-
-#     return candidates[0] if candidates else None
-
-
-# def load_mesh(mesh_path: str) -> trimesh.Trimesh:
-#     mesh = trimesh.load(mesh_path, force="mesh")
-#     if not isinstance(mesh, trimesh.Trimesh):
-#         mesh = mesh.dump(concatenate=True)
-#     if mesh.is_empty or mesh.vertices.size == 0 or mesh.faces.size == 0:
-#         raise ValueError(f"Mesh loaded but appears empty/invalid: {mesh_path}")
-#     return mesh
-
-
-# # ---------------------------
-# # Slicer .mrk.json (XYZ)
-# # ---------------------------
-
-# def load_mrk_json(path: str) -> LandmarkSet:
-#     with open(path, "r", encoding="utf-8") as f:
-#         data = json.load(f)
-
-#     cps = data["markups"][0]["controlPoints"]
-#     pts = np.array([cp["position"] for cp in cps], dtype=float)
-#     labels = [cp.get("label", "") for cp in cps]
-#     return LandmarkSet(xyz=pts, labels=labels)
-
-
-# def save_mrk_json(path: str, xyz: np.ndarray, labels: Optional[List[str]] = None) -> None:
-#     if labels is None or len(labels) != len(xyz):
-#         labels = [f"L{i+1}" for i in range(len(xyz))]
-
-#     control_points = []
-#     for i, p in enumerate(xyz):
-#         control_points.append({
-#             "id": str(i + 1),
-#             "label": labels[i],
-#             "description": "",
-#             "associatedNodeID": "",
-#             "position": [float(p[0]), float(p[1]), float(p[2])],
-#             "orientation": [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
-#             "selected": True,
-#             "locked": False,
-#             "visibility": True,
-#             "positionStatus": "defined"
-#         })
-
-#     out = {
-#         "@schema": "https://raw.githubusercontent.com/Slicer/Slicer/master/Modules/Loadable/Markups/Resources/Schema/markups-schema-v1.0.0.json",
-#         "markups": [{
-#             "type": "Fiducial",
-#             "coordinateSystem": "LPS",  # common in Slicer; adjust if you need RAS
-#             "locked": False,
-#             "labelFormat": "%N-%d",
-#             "controlPoints": control_points,
-#             "measurements": [],
-#             "display": {
-#                 "visibility": True,
-#                 "opacity": 1.0,
-#                 "color": [0.4, 1.0, 0.0],
-#                 "selectedColor": [1.0, 0.5, 0.5],
-#                 "propertiesLabelVisibility": False,
-#                 "pointLabelsVisibility": True,
-#                 "textScale": 3.0,
-#                 "glyphType": "Sphere3D",
-#                 "glyphScale": 1.0,
-#                 "glyphSize": 5.0
-#             }
-#         }]
-#     }
-
-#     with open(path, "w", encoding="utf-8") as f:
-#         json.dump(out, f, indent=2)
-
-
-# # ---------------------------
-# # Barycentric
-# # ---------------------------
-
-# def load_wrap3d_bary_txt(path: str) -> LandmarkSet:
-#     # file contains JSON list like [[tri,u,v],[tri,u,v],...], but extension is .txt
-#     with open(path, "r", encoding="utf-8") as f:
-#         raw = f.read()
-#     raw2 = raw.lstrip("\ufeff \t\r\n")
-#     data = json.loads(raw2)
-#     bary = [(int(t), float(u), float(v)) for (t, u, v) in data]
-#     return LandmarkSet(bary=bary)
-
-# def save_wrap3d_bary_txt(path: str, bary: List[Tuple[int, float, float]]) -> None:
-#     # write JSON list, but to a .txt file
-#     data = [[int(t), float(u), float(v)] for (t, u, v) in bary]
-#     with open(path, "w", encoding="utf-8") as f:
-#         json.dump(data, f, separators=(",", ":"))
-
-# def compute_barycentric_for_point(point: np.ndarray, mesh: trimesh.Trimesh) -> Tuple[int, float, float]:
-#     """
-#     Return (triangle_index, u, v) where u and v are the first two
-#     barycentric weights. The third = 1 - u - v.
-#     """
-#     closest, distance, tri_id = mesh.nearest.on_surface([point])
-#     tri_id = int(tri_id[0])
-
-#     tri = mesh.triangles[tri_id]  # (3,3)
-#     a, b, c = tri
-
-#     v0 = b - a
-#     v1 = c - a
-#     v2 = point - a
-
-#     d00 = float(np.dot(v0, v0))
-#     d01 = float(np.dot(v0, v1))
-#     d11 = float(np.dot(v1, v1))
-#     d20 = float(np.dot(v2, v0))
-#     d21 = float(np.dot(v2, v1))
-
-#     denom = d00 * d11 - d01 * d01
-#     if abs(denom) < 1e-18:
-#         # Degenerate triangle; fall back to something stable
-#         return tri_id, 1.0, 0.0
-
-#     v = (d11 * d20 - d01 * d21) / denom
-#     w = (d00 * d21 - d01 * d20) / denom
-#     u = 1.0 - v - w
-
-#     return tri_id, float(u), float(v)
-
-
-# def xyz_to_bary(xyz: np.ndarray, mesh: trimesh.Trimesh) -> List[Tuple[int, float, float]]:
-#     out = []
-#     for p in xyz:
-#         tri, u, v = compute_barycentric_for_point(p, mesh)
-#         out.append((tri, u, v))
-#     return out
-
-
-# def bary_to_xyz(bary: List[Tuple[int, float, float]], mesh: trimesh.Trimesh) -> np.ndarray:
-#     pts = np.zeros((len(bary), 3), dtype=float)
-#     tris = mesh.triangles  # (F,3,3)
-
-#     for i, (tri_id, u, v) in enumerate(bary):
-#         tri = tris[int(tri_id)]
-#         a, b, c = tri
-#         w = 1.0 - u - v
-#         pts[i] = u * a + v * b + w * c
-#     return pts
-
-
-# def load_bary_json(path: str) -> LandmarkSet:
-#     with open(path, "r", encoding="utf-8") as f:
-#         raw = f.read()
-#     raw2 = raw.lstrip("\ufeff \t\r\n")
-#     data = json.loads(raw2)
-#     bary = [(int(t), float(u), float(v)) for (t, u, v) in data]
-#     return LandmarkSet(bary=bary)
-
-
-# def save_bary_json(path: str, bary: List[Tuple[int, float, float]]) -> None:
-#     data = [[int(t), float(u), float(v)] for (t, u, v) in bary]
-#     with open(path, "w", encoding="utf-8") as f:
-#         json.dump(data, f, indent=2)
-
-
-# def load_bary_txt(path: str) -> LandmarkSet:
-#     bary = []
-#     with open(path, "r", encoding="utf-8") as f:
-#         for line in f:
-#             line = line.strip()
-#             if not line or line.startswith("#"):
-#                 continue
-#             parts = re.split(r"[,\s]+", line)
-#             if len(parts) < 3:
-#                 continue
-#             t = int(float(parts[0]))
-#             u = float(parts[1])
-#             v = float(parts[2])
-#             bary.append((t, u, v))
-#     if not bary:
-#         raise ValueError("No barycentric rows found in txt.")
-#     return LandmarkSet(bary=bary)
-
-
-# def save_bary_txt(path: str, bary: List[Tuple[int, float, float]]) -> None:
-#     with open(path, "w", encoding="utf-8") as f:
-#         for (t, u, v) in bary:
-#             f.write(f"{int(t)} {u:.10f} {v:.10f}\n")
-
-
-# # ---------------------------
-# # XYZ text (simple)
-# # ---------------------------
-
-# def load_xyz_txt(path: str) -> LandmarkSet:
-#     pts = []
-#     labels = []
-#     with open(path, "r", encoding="utf-8") as f:
-#         for line in f:
-#             s = line.strip()
-#             if not s or s.startswith("#"):
-#                 continue
-#             # allow: "label x y z" or "x y z"
-#             parts = re.split(r"[,\s]+", s)
-#             if len(parts) == 3:
-#                 x, y, z = map(float, parts)
-#                 pts.append([x, y, z])
-#                 labels.append("")
-#             elif len(parts) >= 4:
-#                 lbl = parts[0]
-#                 x, y, z = map(float, parts[1:4])
-#                 pts.append([x, y, z])
-#                 labels.append(lbl)
-#     if not pts:
-#         raise ValueError("No XYZ rows found in txt.")
-#     return LandmarkSet(xyz=np.array(pts, dtype=float), labels=labels)
-
-
-# def save_xyz_txt(path: str, xyz: np.ndarray, labels: Optional[List[str]] = None) -> None:
-#     with open(path, "w", encoding="utf-8") as f:
-#         if labels is not None and len(labels) == len(xyz):
-#             for lbl, p in zip(labels, xyz):
-#                 if lbl:
-#                     f.write(f"{lbl} {p[0]:.10f} {p[1]:.10f} {p[2]:.10f}\n")
-#                 else:
-#                     f.write(f"{p[0]:.10f} {p[1]:.10f} {p[2]:.10f}\n")
-#         else:
-#             for p in xyz:
-#                 f.write(f"{p[0]:.10f} {p[1]:.10f} {p[2]:.10f}\n")
-
-
-# # ---------------------------
-# # XML (best-effort)
-# # ---------------------------
-
-# def load_landmarks_xml(path: str) -> LandmarkSet:
-#     """
-#     Supports:
-#     - 3-matic style:
-#         <Entities xmlns:mat="urn:materialise">
-#           <Point>
-#             <Name>Point-001</Name>
-#             <Coordinate>x y z</Coordinate>
-#           </Point>
-#         </Entities>
-
-#       (also works if tags are namespaced like <mat:Point>)
-
-#     - plus best-effort fallback patterns from older logic.
-#     """
-#     tree = ET.parse(path)
-#     root = tree.getroot()
-
-#     def local(tag: str) -> str:
-#         # '{namespace}Tag' -> 'Tag', 'mat:Tag' -> 'Tag'
-#         if "}" in tag:
-#             tag = tag.split("}", 1)[1]
-#         if ":" in tag:
-#             tag = tag.split(":", 1)[1]
-#         return tag
-
-#     pts = []
-#     labels = []
-
-#     # --- First: explicit 3-matic parse (Point/Name/Coordinate) ---
-#     point_elems = []
-#     for elem in root.iter():
-#         if local(elem.tag).lower() == "point":
-#             point_elems.append(elem)
-
-#     for p in point_elems:
-#         name = None
-#         coord_text = None
-
-#         for child in list(p):
-#             t = local(child.tag).lower()
-#             if t == "name":
-#                 name = (child.text or "").strip()
-#             elif t == "coordinate":
-#                 coord_text = (child.text or "").strip()
-
-#         if coord_text:
-#             parts = re.split(r"[,\s]+", coord_text.strip())
-#             if len(parts) >= 3:
-#                 try:
-#                     x, y, z = map(float, parts[:3])
-#                     pts.append([x, y, z])
-#                     labels.append(name or "")
-#                 except Exception:
-#                     pass
-
-#     if pts:
-#         return LandmarkSet(xyz=np.array(pts, dtype=float), labels=labels)
-
-#     # --- Fallback: best-effort older patterns ---
-#     candidates = []
-#     for tag in ["landmark", "Landmark", "point", "Point", "fiducial", "Fiducial"]:
-#         candidates.extend(root.findall(f".//{tag}"))
-
-#     def _try_attrs(elem):
-#         keys = {k.lower(): v for k, v in elem.attrib.items()}
-#         if all(k in keys for k in ["x", "y", "z"]):
-#             x, y, z = float(keys["x"]), float(keys["y"]), float(keys["z"])
-#             lbl = keys.get("name") or keys.get("label") or keys.get("id") or ""
-#             return (x, y, z, lbl)
-#         return None
-
-#     def _try_children(elem):
-#         kids = {local(c.tag).lower(): (c.text or "").strip() for c in list(elem)}
-#         if all(k in kids for k in ["x", "y", "z"]):
-#             x, y, z = float(kids["x"]), float(kids["y"]), float(kids["z"])
-#             lbl = kids.get("name") or kids.get("label") or kids.get("id") or ""
-#             return (x, y, z, lbl)
-#         # also support Coordinate child in fallback
-#         if "coordinate" in kids:
-#             parts = re.split(r"[,\s]+", kids["coordinate"])
-#             if len(parts) >= 3:
-#                 x, y, z = map(float, parts[:3])
-#                 lbl = kids.get("name") or kids.get("label") or kids.get("id") or ""
-#                 return (x, y, z, lbl)
-#         return None
-
-#     def _try_text(elem):
-#         text = (elem.text or "").strip()
-#         if not text:
-#             return None
-#         parts = re.split(r"[,\s]+", text)
-#         if len(parts) >= 3:
-#             x, y, z = map(float, parts[:3])
-#             return (x, y, z, "")
-#         return None
-
-#     used = set()
-#     for elem in candidates:
-#         if elem in used:
-#             continue
-#         used.add(elem)
-
-#         got = _try_attrs(elem) or _try_children(elem) or _try_text(elem)
-#         if got:
-#             x, y, z, lbl = got
-#             pts.append([x, y, z])
-#             labels.append(lbl)
-
-#     if not pts:
-#         raise ValueError("XML parsed but no landmarks found (unsupported schema).")
-
-#     return LandmarkSet(xyz=np.array(pts, dtype=float), labels=labels)
-
-
-# def save_landmarks_xml(path: str, xyz: np.ndarray, labels: Optional[List[str]] = None) -> None:
-#     if labels is None or len(labels) != len(xyz):
-#         labels = [f"Point-{i+1:03d}" for i in range(len(xyz))]
-
-#     # 3-matic style root (with namespace declaration like your example)
-#     root = ET.Element("Entities", {"xmlns:mat": "urn:materialise"})
-
-#     for lbl, p in zip(labels, xyz):
-#         pt = ET.SubElement(root, "Point")
-#         nm = ET.SubElement(pt, "Name")
-#         nm.text = lbl
-#         co = ET.SubElement(pt, "Coordinate")
-#         co.text = f"{float(p[0])} {float(p[1])} {float(p[2])}"
-
-#     tree = ET.ElementTree(root)
-#     tree.write(path, encoding="utf-8", xml_declaration=True)
-
-
-# # ---------------------------
-# # Format detection
-# # ---------------------------
-
-# DetectedFormat = Literal["slicer_mrk_json", "wrap3d_bary", "xyz_txt", "xml"]
-
-# DISPLAY_NAME = {
-#     "slicer_mrk_json": "Slicer (.mrk.json) — XYZ",
-#     "wrap3d_bary": "Wrap 3D — Barycentric ([[tri,u,v], ...])",
-#     "xyz_txt": "XYZ (TXT)",
-#     "xml": "3-matic XML",
-# }
-
-
-# def detect_format(path: str) -> DetectedFormat:
-#     low = path.lower()
-
-#     if low.endswith(".mrk.json"):
-#         return "slicer_mrk_json"
-#     if low.endswith(".xml"):
-#         return "xml"
-
-#     # --- JSON files ---
-#     if low.endswith(".json"):
-#         try:
-#             with open(path, "r", encoding="utf-8") as f:
-#                 data = json.load(f)
-#             if isinstance(data, list) and data and isinstance(data[0], (list, tuple)) and len(data[0]) >= 3:
-#                 return "bary_json"
-#         except Exception:
-#             pass
-#         return "bary_json"
-
-#     # --- TXT / CSV files ---
-#     if low.endswith(".txt") or low.endswith(".csv"):
-#         with open(path, "r", encoding="utf-8") as f:
-#             raw = f.read()
-
-#         # Strip BOM + whitespace
-#         raw2 = raw.lstrip("\ufeff \t\r\n")
-
-#         # If it looks like JSON, try parsing it first (THIS handles your file)
-#         if raw2.startswith("[") or raw2.startswith("{"):
-#             try:
-#                 data = json.loads(raw2)
-#                 if isinstance(data, list) and data and isinstance(data[0], (list, tuple)) and len(data[0]) >= 3:
-#                     return "bary_json"
-#             except Exception:
-#                 # If it's bracketed but not valid JSON, it's definitely NOT xyz
-#                 # (prevents falling through to xyz parser and crashing)
-#                 return "bary_txt"
-
-#         # Line-based sniffing (only for non-JSON-looking txt)
-#         for line in raw2.splitlines():
-#             s = line.strip()
-#             if not s or s.startswith("#"):
-#                 continue
-
-#             # If a line starts with '[' it's not xyz; treat as bary-ish
-#             if s.startswith("["):
-#                 return "bary_json"
-
-#             parts = re.split(r"[,\s]+", s)
-
-#             if len(parts) >= 3:
-#                 try:
-#                     t0 = float(parts[0])
-#                     float(parts[1])
-#                     float(parts[2])
-
-#                     # tri u v on one line
-#                     if abs(t0 - round(t0)) < 1e-6 and len(parts) == 3:
-#                         return "bary_txt"
-
-#                     # xyz: 3 floats
-#                     if len(parts) == 3:
-#                         return "xyz_txt"
-
-#                     # label + xyz
-#                     if len(parts) >= 4:
-#                         return "xyz_txt"
-
-#                 except Exception:
-#                     # label + xyz case
-#                     if len(parts) >= 4:
-#                         try:
-#                             float(parts[1]); float(parts[2]); float(parts[3])
-#                             return "xyz_txt"
-#                         except Exception:
-#                             pass
-#             break
-
-#         return "xyz_txt"
-
-#     return "xyz_txt"
-
-
-# def load_landmarks(path: str) -> Tuple[LandmarkSet, DetectedFormat]:
-#     fmt = detect_format(path)
-#     if fmt == "slicer_mrk_json":
-#         return load_mrk_json(path), fmt
-#     if fmt == "bary_json":
-#         return load_bary_json(path), fmt
-#     if fmt == "bary_txt":
-#         return load_bary_txt(path), fmt
-#     if fmt == "xml":
-#         return load_landmarks_xml(path), fmt
-#     if fmt == "xyz_txt":
-#         return load_xyz_txt(path), fmt
-#     raise ValueError(f"Unsupported format: {fmt}")
-
-
-# # ---------------------------
-# # Mesh conversion (optional)
-# # ---------------------------
-
-# def ensure_mesh_extension(mesh_path: str, desired_ext: str) -> str:
-#     """
-#     If mesh isn't in desired_ext, exports a converted copy next to it and returns that path.
-#     Example: desired_ext='.obj'
-#     """
-#     desired_ext = desired_ext.lower()
-#     cur_ext = os.path.splitext(mesh_path)[1].lower()
-#     if cur_ext == desired_ext:
-#         return mesh_path
-
-#     mesh = load_mesh(mesh_path)
-#     out_path = os.path.splitext(mesh_path)[0] + desired_ext
-#     mesh.export(out_path)
-#     return out_path
-
-
-# # ---------------------------
-# # Conversion orchestration
-# # ---------------------------
-
-# Target = Literal["slicer_mrk_json", "wrap3d_bary", "xyz_txt", "xml"]
-
-
-# def require_mesh_if_needed(src: LandmarkSet, src_fmt: DetectedFormat, tgt: Target) -> bool:
-#     # Need mesh when converting between xyz <-> bary
-#     if tgt in ("bary_json", "bary_txt") and src.xyz is not None:
-#         return True
-#     if tgt in ("slicer_mrk_json", "xyz_txt", "xml") and src.bary is not None:
-#         return True
-#     return False
-
-
-# def convert(landmarks: LandmarkSet, src_fmt: DetectedFormat, target: Target, mesh_path: Optional[str]) -> LandmarkSet:
-#     out = LandmarkSet(labels=landmarks.labels[:] if landmarks.labels else None)
-
-#     # if we already have the needed representation, keep it
-#     if target in ("slicer_mrk_json", "xyz_txt", "xml"):
-#         if landmarks.xyz is not None:
-#             out.xyz = landmarks.xyz
-#             return out
-#         if landmarks.bary is not None:
-#             if not mesh_path:
-#                 raise ValueError("Mesh required to convert barycentric -> xyz.")
-#             mesh = load_mesh(mesh_path)
-#             out.xyz = bary_to_xyz(landmarks.bary, mesh)
-#             return out
-
-#     if target in ("bary_json", "bary_txt"):
-#         if landmarks.bary is not None:
-#             out.bary = landmarks.bary
-#             return out
-#         if landmarks.xyz is not None:
-#             if not mesh_path:
-#                 raise ValueError("Mesh required to convert xyz -> barycentric.")
-#             mesh = load_mesh(mesh_path)
-#             out.bary = xyz_to_bary(landmarks.xyz, mesh)
-#             return out
-
-#     raise ValueError(f"Unhandled conversion path: {src_fmt} -> {target}")
-
-
-# def choose_target_interactive() -> Target:
-#     options = [
-#         ("slicer_mrk_json", "Slicer (.mrk.json) — XYZ"),
-#         ("bary_json",       "Wrap 3D — Barycentric (JSON)  [[tri,u,v], ...]"),
-#         ("bary_txt",        "Wrap 3D — Barycentric (TXT)   tri u v per line"),
-#         ("xyz_txt",         "XYZ (TXT) — x y z per line"),
-#         ("xml",             "3-matic XML"),
-#     ]
-
-#     print("\nConvert TO which format?")
-#     for i, (_, label) in enumerate(options, start=1):
-#         print(f"  {i}) {label}")
-
-#     while True:
-#         s = input("Choose 1-5: ").strip()
-#         if s.isdigit():
-#             idx = int(s)
-#             if 1 <= idx <= len(options):
-#                 return options[idx - 1][0]  # internal key (Target)
-#         print("Invalid choice. Try again.")
-
-
-# def default_output_path(input_path: str, target: Target) -> str:
-#     folder = os.path.dirname(os.path.abspath(input_path))
-#     base = _strip_known_suffixes(input_path)
-
-#     if target == "slicer_mrk_json":
-#         return os.path.join(folder, base + ".mrk.json")
-#     if target == "bary_json":
-#         return os.path.join(folder, base + "_bary.json")
-#     if target == "bary_txt":
-#         return os.path.join(folder, base + "_bary.txt")
-#     if target == "xyz_txt":
-#         return os.path.join(folder, base + "_xyz.txt")
-#     if target == "xml":
-#         return os.path.join(folder, base + ".xml")
-#     return os.path.join(folder, base + "_out")
-
-
-# def save_output(path: str, converted: LandmarkSet, target: Target) -> None:
-#     if target == "slicer_mrk_json":
-#         if converted.xyz is None:
-#             raise ValueError("No xyz to save.")
-#         save_mrk_json(path, converted.xyz, converted.labels)
-#         return
-#     if target == "bary_json":
-#         if converted.bary is None:
-#             raise ValueError("No bary to save.")
-#         save_bary_json(path, converted.bary)
-#         return
-#     if target == "bary_txt":
-#         if converted.bary is None:
-#             raise ValueError("No bary to save.")
-#         save_bary_txt(path, converted.bary)
-#         return
-#     if target == "xyz_txt":
-#         if converted.xyz is None:
-#             raise ValueError("No xyz to save.")
-#         save_xyz_txt(path, converted.xyz, converted.labels)
-#         return
-#     if target == "xml":
-#         if converted.xyz is None:
-#             raise ValueError("No xyz to save.")
-#         save_landmarks_xml(path, converted.xyz, converted.labels)
-#         return
-#     raise ValueError(f"Unknown target: {target}")
-
-
-# # ---------------------------
-# # Main
-# # ---------------------------
-
-# def main():
-#     parser = argparse.ArgumentParser(description="Drag/drop landmark converter (Slicer / barycentric / XML / XYZ).")
-#     parser.add_argument("input", help="Landmark file (drag/drop onto .bat or run directly).")
-#     parser.add_argument("--to", dest="to", default=None,
-#                         choices=["slicer_mrk_json", "bary_json", "bary_txt", "xyz_txt", "xml"],
-#                         help="Target format. If omitted, asks interactively.")
-#     parser.add_argument("--mesh", default=None, help="Optional mesh path (otherwise auto-find by basename).")
-#     parser.add_argument("--force-mesh-obj", action="store_true",
-#                         help="If set and a mesh is needed, ensure the mesh is exported as .obj too.")
-#     args = parser.parse_args()
-
-#     in_path = os.path.abspath(args.input)
-#     if not os.path.exists(in_path):
-#         raise FileNotFoundError(in_path)
-
-#     landmarks, src_fmt = load_landmarks(in_path)
-#     print(f"Loaded: {os.path.basename(in_path)}  (detected: {DISPLAY_NAME.get(src_fmt, src_fmt)})")
-
-#     target: Target = args.to if args.to else choose_target_interactive()  # type: ignore
-
-#     mesh_path = args.mesh
-#     if mesh_path is None:
-#         mesh_path = find_mesh_for_landmarks(in_path)
-
-#     # Only require mesh for xyz<->bary conversion
-#     need_mesh = require_mesh_if_needed(landmarks, src_fmt, target)
-#     if need_mesh:
-#         if not mesh_path:
-#             raise FileNotFoundError(
-#                 "A mesh is required for this conversion, but none was found.\n"
-#                 "Put a mesh with the same basename in the same folder (e.g. case.obj / case.ply / case.stl),\n"
-#                 "or run with --mesh path/to/mesh."
-#             )
-#         mesh_path = os.path.abspath(mesh_path)
-#         print(f"Using mesh: {os.path.basename(mesh_path)}")
-#         if args.force_mesh_obj:
-#             obj_path = ensure_mesh_extension(mesh_path, ".obj")
-#             if obj_path != mesh_path:
-#                 print(f"Exported mesh copy as OBJ: {os.path.basename(obj_path)}")
-#             mesh_path = obj_path
-
-#     converted = convert(landmarks, src_fmt, target, mesh_path)
-
-#     out_path = default_output_path(in_path, target)
-#     # avoid overwriting input when "convert to same format"
-#     if os.path.abspath(out_path) == os.path.abspath(in_path):
-#         out_path = os.path.splitext(out_path)[0] + "_converted" + os.path.splitext(out_path)[1]
-
-#     save_output(out_path, converted, target)
-#     print(f"Saved: {out_path}")
-
-
-# if __name__ == "__main__":
-#     main()
-
-
 import os
 import re
+import sys
 import json
 import glob
+import shutil
 import argparse
+import datetime
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Optional, Tuple, Literal
 
 import numpy as np
@@ -763,6 +29,11 @@ class LandmarkSet:
     # Optional labels (if found in XML, etc.)
     labels: Optional[List[str]] = None
 
+    # LJSON groups / connectivity, carried through so .ljson round-trips losslessly
+    ljson_groups: Optional[List[dict]] = None
+    ljson_connectivity: Optional[List[List[int]]] = None
+    extra: dict = field(default_factory=dict)
+
 
 # ---------------------------
 # Utilities
@@ -780,7 +51,8 @@ def _strip_known_suffixes(filename: str) -> str:
         return base[:-len(".mrk.json")]
 
     # Common output suffixes we may generate
-    for suf in ["_wrap3d_bary.txt", "_wrap3d.txt", "_bary.txt", "_xyz.txt", ".xml", ".txt", ".csv"]:
+    for suf in ["_wrap3d_bary.txt", "_wrap3d.txt", "_bary.txt", "_xyz.txt",
+                "_converted.ljson", ".ljson", ".xml", ".txt", ".csv"]:
         if low.endswith(suf):
             return base[:-len(suf)]
 
@@ -802,9 +74,9 @@ def find_mesh_for_landmarks(landmark_path: str) -> Optional[str]:
         if os.path.exists(p):
             candidates.append(p)
 
-    # If not exact match, try glob for base.*
+    # If not exact match, try glob for base.* (glob.escape: names may contain [ ] etc.)
     if not candidates:
-        for p in glob.glob(os.path.join(folder, base + ".*")):
+        for p in glob.glob(os.path.join(glob.escape(folder), glob.escape(base) + ".*")):
             if os.path.splitext(p)[1].lower() in exts:
                 candidates.append(p)
 
@@ -812,7 +84,9 @@ def find_mesh_for_landmarks(landmark_path: str) -> Optional[str]:
 
 
 def load_mesh(mesh_path: str) -> trimesh.Trimesh:
-    mesh = trimesh.load(mesh_path, force="mesh")
+    # process=False keeps the file's vertex/face order untouched, so barycentric
+    # face indices stay valid against the same mesh in Wrap 3D / other tools.
+    mesh = trimesh.load(mesh_path, force="mesh", process=False)
     if not isinstance(mesh, trimesh.Trimesh):
         mesh = mesh.dump(concatenate=True)
     if mesh.is_empty or mesh.vertices.size == 0 or mesh.faces.size == 0:
@@ -829,10 +103,26 @@ def load_mrk_json(path: str) -> LandmarkSet:
         data = json.load(f)
 
     cps = data["markups"][0]["controlPoints"]
-    pts = np.array([cp["position"] for cp in cps], dtype=float)
-    labels = [cp.get("label", "") for cp in cps]
-    return LandmarkSet(xyz=pts, labels=labels)
 
+    pts = []
+    labels = []
+
+    for cp in cps:
+        pts.append(cp["position"])
+        labels.append(cp.get("label", ""))
+
+    # Natural sort: skull-1, skull-2, ..., skull-10
+    def extract_number(label: str):
+        m = re.search(r'\d+', label)
+        return int(m.group()) if m else float("inf")
+
+    combined = list(zip(labels, pts))
+    combined.sort(key=lambda x: extract_number(x[0]))
+
+    labels_sorted = [c[0] for c in combined]
+    pts_sorted = np.array([c[1] for c in combined], dtype=float)
+
+    return LandmarkSet(xyz=pts_sorted, labels=labels_sorted)
 
 def save_mrk_json(path: str, xyz: np.ndarray, labels: Optional[List[str]] = None) -> None:
     """
@@ -887,6 +177,95 @@ def save_mrk_json(path: str, xyz: np.ndarray, labels: Optional[List[str]] = None
 
 
 # ---------------------------
+# Menpo LJSON (XYZ + named groups + connectivity)
+# ---------------------------
+#
+#   {"version": 2,
+#    "labels": [{"label": "nose", "mask": [10, 11, ...]}, ...],
+#    "landmarks": {"points": [[x, y, z], ...], "connectivity": [[0, 1], ...]}}
+#
+# Per-point labels are generated as "<group>-<global index, 1-based>", e.g. "nose-11".
+# The leading group name lets save_ljson rebuild the groups from any XYZ format that
+# keeps labels (Slicer / XYZ txt / XML), and the number keeps load_mrk_json's natural
+# sort in the original LJSON order.
+
+LJSON_LABEL_RE = re.compile(r"^(?P<group>.+)-(?P<idx>\d+)$")
+
+
+def load_ljson(path: str) -> LandmarkSet:
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    if int(data.get("version", 2)) != 2:
+        raise ValueError(f"Only LJSON version 2 is supported (got {data.get('version')}).")
+
+    lm = data["landmarks"]
+    raw_pts = lm["points"]
+    if any(p is None or any(c is None for c in p) for p in raw_pts):
+        raise ValueError("LJSON contains null (missing) points; fill or remove them first.")
+    pts = np.array(raw_pts, dtype=float)
+    if pts.ndim != 2 or pts.shape[1] != 3:
+        raise ValueError(f"Expected 3D LJSON points (Nx3), got shape {pts.shape}.")
+
+    groups = data.get("labels") or []
+    labels = [f"L-{i+1}" for i in range(len(pts))]
+    for g in groups:
+        for i in g["mask"]:
+            labels[int(i)] = f"{g['label']}-{int(i)+1}"
+
+    return LandmarkSet(
+        xyz=pts,
+        labels=labels,
+        ljson_groups=[{"label": g["label"], "mask": [int(i) for i in g["mask"]]} for g in groups],
+        ljson_connectivity=[[int(a), int(b)] for a, b in lm.get("connectivity", [])],
+    )
+
+
+def _groups_from_labels(labels: Optional[List[str]], n: int) -> Optional[List[dict]]:
+    """Rebuild LJSON groups from '<group>-<n>' labels (as written by load_ljson). None if not that style."""
+    if not labels or len(labels) != n:
+        return None
+    groups: dict = {}
+    for i, lbl in enumerate(labels):
+        m = LJSON_LABEL_RE.match(lbl or "")
+        if not m:
+            return None
+        groups.setdefault(m.group("group"), []).append(i)
+    return [{"label": k, "mask": v} for k, v in groups.items()]
+
+
+def save_ljson(path: str, lms: LandmarkSet, template: Optional[LandmarkSet] = None) -> None:
+    """
+    Group/connectivity source, in priority order:
+      1) --template LJSON (must have the same number of points)
+      2) groups carried on the landmark set (LJSON input)
+      3) '<group>-<n>' style labels (e.g. a Slicer file that came from an LJSON)
+      4) a single 'all' group, no connectivity
+    """
+    xyz = lms.xyz
+    n = len(xyz)
+    groups, conn = lms.ljson_groups, lms.ljson_connectivity
+
+    if template is not None:
+        if len(template.xyz) != n:
+            raise ValueError(f"Template LJSON has {len(template.xyz)} points but landmarks have {n}.")
+        groups, conn = template.ljson_groups, template.ljson_connectivity
+    if not groups:
+        groups = _groups_from_labels(lms.labels, n) or [{"label": "all", "mask": list(range(n))}]
+
+    out = {
+        "labels": groups,
+        "landmarks": {
+            "connectivity": conn or [],
+            "points": [[float(p[0]), float(p[1]), float(p[2])] for p in xyz],
+        },
+        "version": 2,
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(out, f, indent=4)
+
+
+# ---------------------------
 # Wrap 3D barycentric (.txt containing JSON list)
 # ---------------------------
 
@@ -897,7 +276,7 @@ def load_wrap3d_bary_txt(path: str) -> LandmarkSet:
     """
     with open(path, "r", encoding="utf-8") as f:
         raw = f.read()
-    raw2 = raw.lstrip("\ufeff \t\r\n")
+    raw2 = raw.lstrip("﻿ \t\r\n")
     data = json.loads(raw2)
     bary = [(int(t), float(u), float(v)) for (t, u, v) in data]
     return LandmarkSet(bary=bary)
@@ -916,57 +295,37 @@ def save_wrap3d_bary_txt(path: str, bary: List[Tuple[int, float, float]]) -> Non
 # ---------------------------
 # Barycentric math
 # ---------------------------
+# Convention used throughout: point = u*A + v*B + w*C, w = 1-u-v,
+# where A, B, C are the triangle's vertices in file order.
 
-def compute_barycentric_for_point(point: np.ndarray, mesh: trimesh.Trimesh) -> Tuple[int, float, float]:
+def xyz_to_bary(xyz: np.ndarray, mesh: trimesh.Trimesh,
+                warn_dist: Optional[float] = None) -> List[Tuple[int, float, float]]:
     """
-    Return (triangle_index, u, v) where u and v are the first two
-    barycentric weights. The third = 1 - u - v.
+    Project each point onto the closest mesh triangle and return (triangle_index, u, v).
+    Points further than warn_dist from the surface are reported (they get snapped).
     """
-    closest, distance, tri_id = mesh.nearest.on_surface([point])
-    tri_id = int(tri_id[0])
+    xyz = np.asarray(xyz, dtype=float)
+    closest, distance, tri_ids = mesh.nearest.on_surface(xyz)
 
-    tri = mesh.triangles[tri_id]  # (3,3)
-    a, b, c = tri
+    if warn_dist is not None:
+        for i in np.where(distance > warn_dist)[0]:
+            print(f"   ⚠️ Landmark {i+1} is {distance[i]:.4g} from the mesh surface (snapped onto it).")
 
-    v0 = b - a
-    v1 = c - a
-    v2 = point - a
-
-    d00 = float(np.dot(v0, v0))
-    d01 = float(np.dot(v0, v1))
-    d11 = float(np.dot(v1, v1))
-    d20 = float(np.dot(v2, v0))
-    d21 = float(np.dot(v2, v1))
-
-    denom = d00 * d11 - d01 * d01
-    if abs(denom) < 1e-18:
-        return tri_id, 1.0, 0.0
-
-    v = (d11 * d20 - d01 * d21) / denom
-    w = (d00 * d21 - d01 * d20) / denom
-    u = 1.0 - v - w
-
-    return tri_id, float(u), float(v)
-
-
-def xyz_to_bary(xyz: np.ndarray, mesh: trimesh.Trimesh) -> List[Tuple[int, float, float]]:
-    out: List[Tuple[int, float, float]] = []
-    for p in xyz:
-        tri, u, v = compute_barycentric_for_point(p, mesh)
-        out.append((tri, u, v))
-    return out
+    # Barycentrics of the projected point, so bary -> xyz reproduces it exactly
+    w = trimesh.triangles.points_to_barycentric(mesh.triangles[tri_ids], closest)
+    return [(int(t), float(a), float(b)) for t, (a, b, _) in zip(tri_ids, w)]
 
 
 def bary_to_xyz(bary: List[Tuple[int, float, float]], mesh: trimesh.Trimesh) -> np.ndarray:
-    pts = np.zeros((len(bary), 3), dtype=float)
-    tris = mesh.triangles  # (F,3,3)
-
-    for i, (tri_id, u, v) in enumerate(bary):
-        tri = tris[int(tri_id)]
-        a, b, c = tri
-        w = 1.0 - u - v
-        pts[i] = u * a + v * b + w * c
-    return pts
+    tri_ids = np.array([int(t) for t, _, _ in bary])
+    if len(tri_ids) and tri_ids.max() >= len(mesh.faces):
+        raise ValueError(
+            f"Face ID {tri_ids.max()} is out of bounds for mesh (max face ID {len(mesh.faces)-1}). "
+            "Is this the right mesh?"
+        )
+    uv = np.array([(u, v) for _, u, v in bary], dtype=float).reshape(-1, 2)
+    weights = np.column_stack([uv, 1.0 - uv.sum(axis=1)])  # (N,3)
+    return np.einsum("ij,ijk->ik", weights, mesh.triangles[tri_ids])
 
 
 # ---------------------------
@@ -1140,14 +499,17 @@ def save_landmarks_xml(path: str, xyz: np.ndarray, labels: Optional[List[str]] =
 # Format detection
 # ---------------------------
 
-DetectedFormat = Literal["slicer_mrk_json", "wrap3d_bary_txt", "xyz_txt", "xml"]
-Target = Literal["slicer_mrk_json", "wrap3d_bary_txt", "xyz_txt", "xml"]
+DetectedFormat = Literal["slicer_mrk_json", "wrap3d_bary_txt", "xyz_txt", "xml", "ljson"]
+Target = Literal["slicer_mrk_json", "wrap3d_bary_txt", "xyz_txt", "xml", "ljson"]
+
+XYZ_TARGETS = ("slicer_mrk_json", "xyz_txt", "xml", "ljson")
 
 DISPLAY_NAME = {
     "slicer_mrk_json": "Slicer (.mrk.json) — XYZ",
     "wrap3d_bary_txt": "Wrap 3D — Barycentric (.txt) [[tri,u,v], ...]",
     "xyz_txt": "XYZ (TXT)",
     "xml": "3-matic XML",
+    "ljson": "Menpo LJSON (.ljson) — XYZ + groups",
 }
 
 
@@ -1156,6 +518,8 @@ def detect_format(path: str) -> DetectedFormat:
 
     if low.endswith(".mrk.json"):
         return "slicer_mrk_json"
+    if low.endswith(".ljson"):
+        return "ljson"
     if low.endswith(".xml"):
         return "xml"
 
@@ -1169,7 +533,7 @@ def detect_format(path: str) -> DetectedFormat:
     if low.endswith(".txt") or low.endswith(".csv"):
         with open(path, "r", encoding="utf-8") as f:
             raw = f.read()
-        raw2 = raw.lstrip("\ufeff \t\r\n")
+        raw2 = raw.lstrip("﻿ \t\r\n")
 
         # Wrap3D barycentric txt: JSON list
         if raw2.startswith("["):
@@ -1193,6 +557,8 @@ def load_landmarks(path: str) -> Tuple[LandmarkSet, DetectedFormat]:
     fmt = detect_format(path)
     if fmt == "slicer_mrk_json":
         return load_mrk_json(path), fmt
+    if fmt == "ljson":
+        return load_ljson(path), fmt
     if fmt == "wrap3d_bary_txt":
         return load_wrap3d_bary_txt(path), fmt
     if fmt == "xml":
@@ -1226,16 +592,21 @@ def require_mesh_if_needed(src: LandmarkSet, src_fmt: DetectedFormat, tgt: Targe
     # Need mesh when converting between xyz <-> bary
     if tgt == "wrap3d_bary_txt" and src.xyz is not None:
         return True
-    if tgt in ("slicer_mrk_json", "xyz_txt", "xml") and src.bary is not None:
+    if tgt in XYZ_TARGETS and src.bary is not None:
         return True
     return False
 
 
-def convert(landmarks: LandmarkSet, src_fmt: DetectedFormat, target: Target, mesh_path: Optional[str]) -> LandmarkSet:
-    out = LandmarkSet(labels=landmarks.labels[:] if landmarks.labels else None)
+def convert(landmarks: LandmarkSet, src_fmt: DetectedFormat, target: Target, mesh_path: Optional[str],
+            warn_dist: Optional[float] = None) -> LandmarkSet:
+    out = LandmarkSet(
+        labels=landmarks.labels[:] if landmarks.labels else None,
+        ljson_groups=landmarks.ljson_groups,
+        ljson_connectivity=landmarks.ljson_connectivity,
+    )
 
     # Targets that need XYZ
-    if target in ("slicer_mrk_json", "xyz_txt", "xml"):
+    if target in XYZ_TARGETS:
         if landmarks.xyz is not None:
             out.xyz = landmarks.xyz
             return out
@@ -1255,7 +626,10 @@ def convert(landmarks: LandmarkSet, src_fmt: DetectedFormat, target: Target, mes
             if not mesh_path:
                 raise ValueError("Mesh required to convert xyz -> barycentric.")
             mesh = load_mesh(mesh_path)
-            out.bary = xyz_to_bary(landmarks.xyz, mesh)
+            out.bary = xyz_to_bary(landmarks.xyz, mesh, warn_dist=warn_dist)
+            # Round-trip check: how far the stored bary lands from the input point
+            err = np.linalg.norm(bary_to_xyz(out.bary, mesh) - landmarks.xyz, axis=1)
+            print(f"   Round-trip xyz -> bary -> xyz error: max {err.max():.3g}, mean {err.mean():.3g}")
             return out
 
     raise ValueError(f"Unhandled conversion path: {src_fmt} -> {target}")
@@ -1267,6 +641,7 @@ def choose_target_interactive() -> Target:
         ("slicer_mrk_json", "Slicer (.mrk.json) — XYZ"),
         ("xyz_txt", "XYZ (TXT) — x y z per line"),
         ("xml", "3-matic XML"),
+        ("ljson", "Menpo LJSON (.ljson) — XYZ + groups"),
     ]
 
     print("\nConvert TO which format?")
@@ -1282,8 +657,8 @@ def choose_target_interactive() -> Target:
         print("Invalid choice. Try again.")
 
 
-def default_output_path(input_path: str, target: Target) -> str:
-    folder = os.path.dirname(os.path.abspath(input_path))
+def default_output_path(input_path: str, target: Target, out_dir: Optional[str] = None) -> str:
+    folder = out_dir or os.path.dirname(os.path.abspath(input_path))
     base = _strip_known_suffixes(input_path)
 
     if target == "slicer_mrk_json":
@@ -1294,10 +669,13 @@ def default_output_path(input_path: str, target: Target) -> str:
         return os.path.join(folder, base + "_xyz.txt")
     if target == "xml":
         return os.path.join(folder, base + ".xml")
+    if target == "ljson":
+        return os.path.join(folder, base + ".ljson")
     return os.path.join(folder, base + "_out")
 
 
-def save_output(path: str, converted: LandmarkSet, target: Target) -> None:
+def save_output(path: str, converted: LandmarkSet, target: Target,
+                ljson_template: Optional[LandmarkSet] = None) -> None:
     if target == "slicer_mrk_json":
         if converted.xyz is None:
             raise ValueError("No xyz to save.")
@@ -1322,33 +700,56 @@ def save_output(path: str, converted: LandmarkSet, target: Target) -> None:
         save_landmarks_xml(path, converted.xyz, converted.labels)
         return
 
+    if target == "ljson":
+        if converted.xyz is None:
+            raise ValueError("No xyz to save.")
+        save_ljson(path, converted, ljson_template)
+        return
+
     raise ValueError(f"Unknown target: {target}")
+
+
+# ---------------------------
+# Provenance
+# ---------------------------
+
+def record_provenance(out_dirs: List[str]) -> None:
+    """Append date + exact command to run_command.txt and drop a copy of this script in each output folder."""
+    stamp = datetime.datetime.now().isoformat(timespec="seconds")
+    frozen = getattr(sys, "frozen", False)
+    cmd = " ".join(f'"{a}"' if any(ch in a for ch in " *?[") else a for a in sys.argv)
+    for d in sorted(set(out_dirs)):
+        with open(os.path.join(d, "run_command.txt"), "a", encoding="utf-8") as f:
+            f.write(f"{stamp}  {'[exe] ' if frozen else ''}{cmd}\n")
+        if not frozen:
+            dst = os.path.join(d, os.path.basename(__file__))
+            if os.path.abspath(dst) != os.path.abspath(__file__):
+                shutil.copy2(__file__, dst)
 
 
 # ---------------------------
 # Main
 # ---------------------------
 
-def main():
-    parser = argparse.ArgumentParser(description="Drag/drop landmark converter (Slicer / Wrap 3D bary / 3-matic XML / XYZ).")
-    parser.add_argument("input", help="Landmark file (drag/drop onto the .exe or run directly).")
-    parser.add_argument("--to", dest="to", default=None,
-                        choices=["wrap3d_bary_txt", "slicer_mrk_json", "xyz_txt", "xml"],
-                        help="Target format. If omitted, asks interactively.")
-    parser.add_argument("--mesh", default=None, help="Optional mesh path (otherwise auto-find by basename).")
-    parser.add_argument("--force-mesh-obj", action="store_true",
-                        help="If set and a mesh is needed, ensure the mesh is exported as .obj too.")
-    args = parser.parse_args()
+LANDMARK_EXTS = (".mrk.json", ".ljson", ".xml", ".txt", ".csv")
 
-    in_path = os.path.abspath(args.input)
-    if not os.path.exists(in_path):
-        raise FileNotFoundError(in_path)
 
+def expand_inputs(inputs: List[str], pattern: str) -> List[str]:
+    files = []
+    for p in inputs:
+        p = os.path.abspath(p)
+        if os.path.isdir(p):
+            files.extend(sorted(glob.glob(os.path.join(glob.escape(p), pattern))))
+        elif os.path.exists(p):
+            files.append(p)
+        else:
+            raise FileNotFoundError(p)
+    return [f for f in files if f.lower().endswith(LANDMARK_EXTS)]
+
+
+def convert_one(in_path: str, target: Target, args, ljson_template: Optional[LandmarkSet]) -> str:
     landmarks, src_fmt = load_landmarks(in_path)
     print(f"Loaded: {os.path.basename(in_path)}  (detected: {DISPLAY_NAME.get(src_fmt, src_fmt)})")
-
-    target: Target = args.to if args.to else choose_target_interactive()  # type: ignore
-    print(f"Target: {DISPLAY_NAME.get(target, target)} ({target})")
 
     mesh_path = args.mesh
     if mesh_path is None:
@@ -1371,15 +772,76 @@ def main():
                 print(f"Exported mesh copy as OBJ: {os.path.basename(obj_path)}")
             mesh_path = obj_path
 
-    converted = convert(landmarks, src_fmt, target, mesh_path)
+    converted = convert(landmarks, src_fmt, target, mesh_path, warn_dist=args.warn_dist)
 
-    out_path = default_output_path(in_path, target)
+    out_path = default_output_path(in_path, target, args.out_dir)
     # avoid overwriting input when "convert to same format"
     if os.path.abspath(out_path) == os.path.abspath(in_path):
-        out_path = os.path.splitext(out_path)[0] + "_converted" + os.path.splitext(out_path)[1]
+        root, ext = os.path.splitext(out_path)
+        if out_path.lower().endswith(".mrk.json"):
+            root, ext = out_path[:-len(".mrk.json")], ".mrk.json"
+        out_path = root + "_converted" + ext
 
-    save_output(out_path, converted, target)
+    save_output(out_path, converted, target, ljson_template)
     print(f"Saved: {out_path}")
+    return out_path
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Drag/drop landmark converter (Slicer / Wrap 3D bary / 3-matic XML / XYZ / Menpo LJSON).")
+    parser.add_argument("inputs", nargs="+",
+                        help="Landmark file(s) or folder(s) (drag/drop onto the .exe or run directly).")
+    parser.add_argument("--to", dest="to", default=None,
+                        choices=["wrap3d_bary_txt", "slicer_mrk_json", "xyz_txt", "xml", "ljson"],
+                        help="Target format. If omitted, asks interactively.")
+    parser.add_argument("--mesh", default=None,
+                        help="Optional mesh path (otherwise auto-find by basename). Applies to every input.")
+    parser.add_argument("--template", default=None,
+                        help="LJSON whose groups/connectivity are copied when writing .ljson "
+                             "(e.g. when converting Wrap 3D bary back to LJSON).")
+    parser.add_argument("--pattern", default="*.ljson",
+                        help="Glob used when an input is a folder (default: *.ljson).")
+    parser.add_argument("--out-dir", default=None,
+                        help="Write outputs here instead of next to each input.")
+    parser.add_argument("--warn-dist", type=float, default=None,
+                        help="Warn when a landmark is further than this from the mesh surface (xyz -> bary).")
+    parser.add_argument("--force-mesh-obj", action="store_true",
+                        help="If set and a mesh is needed, ensure the mesh is exported as .obj too.")
+    parser.add_argument("--no-provenance", action="store_true",
+                        help="Don't write run_command.txt / a copy of this script next to the outputs.")
+    args = parser.parse_args()
+
+    files = expand_inputs(args.inputs, args.pattern)
+    if not files:
+        raise FileNotFoundError("No landmark files found in the given inputs.")
+
+    if args.out_dir:
+        args.out_dir = os.path.abspath(args.out_dir)
+        os.makedirs(args.out_dir, exist_ok=True)
+
+    target: Target = args.to if args.to else choose_target_interactive()  # type: ignore
+    print(f"Target: {DISPLAY_NAME.get(target, target)} ({target})")
+
+    ljson_template = load_ljson(args.template) if args.template else None
+
+    out_paths, failed = [], []
+    for i, in_path in enumerate(files, start=1):
+        if len(files) > 1:
+            print(f"\n[{i}/{len(files)}]")
+        try:
+            out_paths.append(convert_one(in_path, target, args, ljson_template))
+        except Exception as e:
+            if len(files) == 1:
+                raise
+            print(f"   ❌ {os.path.basename(in_path)}: {e}")
+            failed.append(in_path)
+
+    if out_paths and not args.no_provenance:
+        record_provenance([os.path.dirname(p) for p in out_paths])
+
+    if len(files) > 1:
+        print(f"\nDone: {len(out_paths)} converted, {len(failed)} failed.")
 
 
 if __name__ == "__main__":

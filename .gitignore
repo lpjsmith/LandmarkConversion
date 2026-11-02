@@ -1,0 +1,13 @@
+build/
+dist/
+*.exe
+__pycache__/
+*.pyc
+
+# patient data / test outputs - keep out of git
+*.obj
+*.stl
+*.ply
+*.ljson
+*.mrk.json
+run_command.txt
